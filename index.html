@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Thread Studio: Hook generator and thread formatter for X</title>
+  <meta name="description" content="Generate scroll-stopping hooks, split long text into numbered X threads, and preview every post live before you publish.">
+  <meta name="color-scheme" content="dark">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg: 'var(--bg)',
+            surface: 'var(--surface)',
+            raised: 'var(--surface-2)',
+            line: 'var(--line)',
+            ink: 'var(--ink)',
+            muted: 'var(--muted)',
+            accent: 'var(--accent)'
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif']
+          }
+        }
+      }
+    };
+  </script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="min-h-screen bg-bg font-sans text-sm text-ink antialiased">
+
+  <header class="sticky top-0 z-20 border-b border-line bg-bg">
+    <div class="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
+      <div class="flex items-center gap-2.5">
+        <span class="logo" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none">
+            <path d="M2 3h12M2 8h8M2 13h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="font-semibold">Thread Studio</span>
+        <span class="hidden text-muted sm:inline">Hooks and threads for X</span>
+      </div>
+      <p class="text-xs text-muted">Everything runs in your browser. Nothing is uploaded.</p>
+    </div>
+  </header>
+
+  <main class="mx-auto flex max-w-7xl flex-col gap-5 px-4 py-6 sm:px-6">
+
+    <!-- Area 1: Hook generator -->
+    <section aria-labelledby="hooks-title" class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 id="hooks-title" class="text-sm font-semibold">Hook generator</h2>
+          <p class="mt-0.5 text-muted">Pick a topic and a tone, then send your favorite hook straight to the thread editor.</p>
+        </div>
+      </div>
+
+      <form id="hook-form" class="flex flex-col gap-3 px-5 pb-4 pt-4 md:flex-row md:items-end" novalidate>
+        <div class="flex-1">
+          <label for="topic" class="field-label">Topic</label>
+          <input id="topic" name="topic" type="text" class="field" placeholder="Enter topic..." maxlength="80" autocomplete="off" aria-describedby="topic-error">
+        </div>
+        <div class="md:w-56">
+          <label for="tone" class="field-label">Tone</label>
+          <select id="tone" name="tone" class="field">
+            <option value="curiosity">Curiosity</option>
+            <option value="before-after">Before/After</option>
+            <option value="controversial">Controversial</option>
+            <option value="how-i">How I...</option>
+          </select>
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg" id="btn-generate">Generate hooks</button>
+      </form>
+      <p id="topic-error" class="px-5 pb-3 text-xs text-danger" role="alert" hidden>Enter a topic first, for example "building in public".</p>
+
+      <p id="hook-empty" class="px-5 pb-6 text-muted">Your hooks will show up here. Each one is a template, so edit it to fit your voice before you post.</p>
+      <ul id="hook-results" class="grid gap-3 px-5 pb-5 md:grid-cols-2" aria-live="polite"></ul>
+    </section>
+
+    <!-- Area 2: Thread editor and preview -->
+    <div class="grid gap-5 lg:grid-cols-2">
+
+      <section id="editor-panel" aria-labelledby="editor-title" class="panel flex min-h-[460px] flex-col lg:h-[680px]">
+        <div class="panel-head">
+          <h2 id="editor-title" class="text-sm font-semibold">Thread editor</h2>
+          <div class="flex flex-wrap items-center gap-2">
+            <label class="switch">
+              <input type="checkbox" id="opt-numbering" checked>
+              <span class="track" aria-hidden="true"></span>
+              <span>Auto-number (1/n)</span>
+            </label>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-sample">Load sample</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-clear">Clear</button>
+          </div>
+        </div>
+        <div class="flex min-h-0 flex-1 flex-col px-5 pb-4 pt-4">
+          <label for="thread-input" class="sr-only">Thread text</label>
+          <textarea id="thread-input" class="editor" spellcheck="true" placeholder="Write or paste your full text here. It splits into posts of up to 280 characters at sentence ends. Put --- on its own line to force a new post."></textarea>
+          <div class="mt-3 flex items-center justify-between text-xs text-muted" aria-live="polite">
+            <span id="stat-chars">0 characters</span>
+            <span id="stat-posts">0 posts</span>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="preview-title" class="panel flex min-h-[460px] flex-col lg:h-[680px]">
+        <div class="panel-head">
+          <h2 id="preview-title" class="text-sm font-semibold">Live preview</h2>
+          <div class="flex flex-wrap items-center gap-2">
+            <input id="in-name" type="text" class="field field-sm w-28" value="Your Name" maxlength="30" aria-label="Display name in preview">
+            <input id="in-handle" type="text" class="field field-sm w-28" value="yourhandle" maxlength="15" aria-label="Handle in preview">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-copy-all" disabled>Copy Full Thread</button>
+          </div>
+        </div>
+        <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div id="thread" class="thread" hidden></div>
+          <div id="preview-empty" class="mx-auto max-w-xs py-16 text-center text-muted">
+            <p class="mb-1 font-semibold text-ink">No posts yet</p>
+            <p>Start typing in the editor or insert a hook to see your thread here.</p>
+          </div>
+        </div>
+        <p class="border-t border-line px-5 py-3 text-xs text-muted">"Publish to X" opens one post in the X composer. To publish a thread, post the first one, then add the rest with the plus button.</p>
+      </section>
+    </div>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="script.js"></script>
+</body>
+</html>
