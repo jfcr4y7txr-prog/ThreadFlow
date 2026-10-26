@@ -22,6 +22,9 @@ body { background: var(--bg); }
 
 .text-danger { color: var(--danger); }
 
+/* Highlighted hashtags, mentions and links */
+.tok { color: var(--accent); }
+
 /* Brand */
 .logo {
   width: 24px;

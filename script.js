@@ -10,6 +10,7 @@
     URL_WEIGHT: 23,
     WARN_AT: 260,
     HOOK_COUNT: 5,
+    MAX_HASHTAGS: 3,
     TOAST_MS: 1800,
     STORAGE_KEY: 'thread-studio:v2',
     THREAD_SEPARATOR: '\n\n---\n\n',
@@ -254,15 +255,71 @@
       return copy;
     },
 
+    // Keyword patterns mapped to hashtags that fit the topic.
+    KEYWORD_TAGS: [
+      [/saas|software|startup|founder|indie|bootstrap/i, ['SaaS', 'BuildInPublic', 'Startups']],
+      [/\bai\b|artificial|gpt|llm|machine learning|chatbot/i, ['AI', 'MachineLearning']],
+      [/marketing|\bseo\b|growth|brand|audience|newsletter/i, ['Marketing', 'GrowthHacking']],
+      [/code|coding|program|developer|javascript|python|web dev|\bdev\b/i, ['Coding', 'WebDev']],
+      [/no-?code/i, ['NoCode']],
+      [/fitness|workout|gym|training|running|health/i, ['Fitness', 'Health']],
+      [/productiv|habit|focus|routine|time management/i, ['Productivity', 'Habits']],
+      [/writing|writer|copywriting|blog|storytelling/i, ['Writing', 'Copywriting']],
+      [/design|\bux\b|\bui\b|figma/i, ['Design', 'UX']],
+      [/crypto|bitcoin|web3|blockchain|ethereum/i, ['Crypto', 'Web3']],
+      [/invest|stock|finance|money|saving|budget/i, ['Investing', 'Finance']],
+      [/career|\bjob|hiring|interview|leadership|manage/i, ['Career', 'Leadership']],
+      [/learn|study|education|school|course/i, ['Learning', 'Education']],
+      [/ecommerce|e-commerce|shopify|dropshipping/i, ['Ecommerce', 'Shopify']],
+      [/youtube|video|podcast|creator|content/i, ['ContentCreator', 'CreatorEconomy']],
+      [/mindset|motivation|discipline|confidence/i, ['Mindset', 'Motivation']],
+    ],
+
+    // "building in public" -> "BuildingInPublic"
+    topicTag(topic) {
+      const words = topic.match(/[\p{L}\p{N}]+/gu) || [];
+      if (!words.length || words.length > 3) return null;
+      const tag = words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('');
+      return tag.length <= 30 && /\p{L}/u.test(tag) ? tag : null;
+    },
+
+    tagsFor(topic) {
+      const found = [];
+      const own = this.topicTag(topic);
+      if (own) found.push(own);
+      this.KEYWORD_TAGS.forEach(([pattern, tags]) => {
+        if (pattern.test(topic)) found.push(...tags);
+      });
+      const seen = new Set();
+      return found
+        .filter((tag) => {
+          const key = tag.toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .slice(0, CONFIG.MAX_HASHTAGS);
+    },
+
+    // Hook text plus hashtags. Tags that would push it over the limit are dropped.
+    compose(hook, withTags) {
+      const tags = withTags ? hook.tags.slice() : [];
+      const build = () => (tags.length ? `${hook.body}\n\n${tags.map((t) => '#' + t).join(' ')}` : hook.body);
+      while (tags.length && TextMetrics.weight(build()) > CONFIG.LIMIT) tags.pop();
+      return build();
+    },
+
     generate(rawTopic, tone, count) {
       const topic = this.normalizeTopic(rawTopic);
       if (!topic) return [];
       const templates = this.TEMPLATES[tone] || this.TEMPLATES.curiosity;
+      const tags = this.tagsFor(topic);
       return this.shuffle(templates)
         .slice(0, count)
-        .map((template) =>
-          template.split('{topic}').join(topic).split('{Topic}').join(this.capitalize(topic))
-        );
+        .map((template) => ({
+          body: template.split('{topic}').join(topic).split('{Topic}').join(this.capitalize(topic)),
+          tags,
+        }));
     },
   };
 
@@ -330,6 +387,18 @@
     const node = document.createElement(tag);
     if (className) node.className = className;
     if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  // Builds a text node tree where #hashtags, @mentions and links are highlighted.
+  const TOKEN_PATTERN = /(https?:\/\/\S+|#(?=[\p{N}_]*\p{L})[\p{L}\p{N}_]+|@\w+)/u;
+  function createRichText(tag, className, text) {
+    const node = createElement(tag, className);
+    text.split(TOKEN_PATTERN).forEach((part, index) => {
+      if (!part) return;
+      if (index % 2) node.appendChild(createElement('span', 'tok', part));
+      else node.appendChild(document.createTextNode(part));
+    });
     return node;
   }
 
@@ -402,6 +471,7 @@
     init() {
       this.cacheDom();
       this.restore();
+      this.renderHooks();
       this.bindEvents();
       this.renderThread();
     },
@@ -416,6 +486,7 @@
         hookResults: 'hook-results',
         input: 'thread-input',
         numbering: 'opt-numbering',
+        hashtags: 'opt-hashtags',
         sample: 'btn-sample',
         clear: 'btn-clear',
         statChars: 'stat-chars',
@@ -440,6 +511,12 @@
         this.dom.tone.value = saved.tone;
       }
       if (typeof saved.text === 'string') this.dom.input.value = saved.text;
+      if (typeof saved.hashtags === 'boolean') this.dom.hashtags.checked = saved.hashtags;
+      if (Array.isArray(saved.hooks)) {
+        this.state.hooks = saved.hooks.filter(
+          (h) => h && typeof h.body === 'string' && Array.isArray(h.tags)
+        );
+      }
       if (typeof saved.numbering === 'boolean') this.dom.numbering.checked = saved.numbering;
       if (saved.name) this.dom.name.value = saved.name;
       if (saved.handle) this.dom.handle.value = saved.handle;
@@ -451,6 +528,8 @@
         tone: this.dom.tone.value,
         text: this.dom.input.value,
         numbering: this.dom.numbering.checked,
+        hashtags: this.dom.hashtags.checked,
+        hooks: this.state.hooks,
         name: this.dom.name.value,
         handle: this.dom.handle.value,
       });
@@ -468,6 +547,10 @@
         this.persist();
       });
       dom.tone.addEventListener('change', () => this.persist());
+      dom.hashtags.addEventListener('change', () => {
+        this.renderHooks();
+        this.persist();
+      });
       dom.hookResults.addEventListener('click', (event) => this.handleHookClick(event));
 
       dom.input.addEventListener('input', () => this.handleChange());
@@ -517,11 +600,13 @@
       hookEmpty.hidden = this.state.hooks.length > 0;
 
       this.state.hooks.forEach((hook, index) => {
+        const text = this.hookText(hook);
         const item = createElement('li', 'hook-card');
-        item.appendChild(createElement('p', 'hook-text', hook));
+        item.appendChild(createRichText('p', 'hook-text', text));
 
         const actions = createElement('div', 'hook-actions');
         actions.append(
+          createCounter(TextMetrics.weight(text)),
           createButton('Insert Hook into Thread', 'btn btn-primary btn-sm', 'insert-hook', index),
           createButton('Copy Hook', 'btn btn-sm', 'copy-hook', index)
         );
@@ -530,11 +615,16 @@
       });
     },
 
+    hookText(hook) {
+      return HookGenerator.compose(hook, this.dom.hashtags.checked);
+    },
+
     async handleHookClick(event) {
       const button = event.target.closest('button[data-action]');
       if (!button) return;
-      const hook = this.state.hooks[Number(button.dataset.index)];
-      if (!hook) return;
+      const entry = this.state.hooks[Number(button.dataset.index)];
+      if (!entry) return;
+      const hook = this.hookText(entry);
 
       if (button.dataset.action === 'insert-hook') {
         this.insertHook(hook);
@@ -611,7 +701,7 @@
           meta.appendChild(createElement('span', 'post-index', `${index + 1}/${posts.length}`));
         }
         content.appendChild(meta);
-        content.appendChild(createElement('p', 'post-body', post));
+        content.appendChild(createRichText('p', 'post-body', post));
 
         const footer = createElement('div', 'post-foot');
         footer.appendChild(createCounter(TextMetrics.weight(post)));
