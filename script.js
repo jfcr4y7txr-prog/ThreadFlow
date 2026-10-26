@@ -11,6 +11,7 @@
     WARN_AT: 260,
     HOOK_COUNT: 5,
     MAX_HASHTAGS: 3,
+    MAX_SUGGESTIONS: 12,
     TOAST_MS: 1800,
     STORAGE_KEY: 'thread-studio:v2',
     THREAD_SEPARATOR: '\n\n---\n\n',
@@ -167,32 +168,36 @@
 
     // Returns the post bodies without numbering. When numbering is on, room for
     // "\n\n" + "i/n" is reserved so the finished posts never exceed the limit.
-    build(text, numbering) {
+    build(text, numbering, base = CONFIG.LIMIT) {
       const blocks = text.split(this.FORCED_BREAK).map((b) => b.trim()).filter(Boolean);
       if (!blocks.length) return [];
 
       const unitSets = blocks.map((block) => this.toUnits(block));
       const packAll = (limit) => unitSets.flatMap((units) => this.pack(units, limit));
 
-      const plain = packAll(CONFIG.LIMIT);
+      const plain = packAll(base);
       if (plain.length <= 1 || !numbering) return plain;
 
       let count = plain.length;
       for (let attempt = 0; attempt < 6; attempt++) {
         const reserve = 2 + TextMetrics.digits(count) * 2 + 1;
-        const candidate = packAll(CONFIG.LIMIT - reserve);
+        const candidate = packAll(base - reserve);
         if (TextMetrics.digits(candidate.length) <= TextMetrics.digits(count)) return candidate;
         count = candidate.length;
       }
-      return packAll(CONFIG.LIMIT - (2 + TextMetrics.digits(count) * 2 + 1));
+      return packAll(base - (2 + TextMetrics.digits(count) * 2 + 1));
     },
 
     // Returns the finished post texts, numbered when requested.
-    format(text, numbering) {
-      const bodies = this.build(text, numbering);
+    // Hashtags (if any) go on every post, between the text and the "i/n" counter.
+    format(text, numbering, tags = []) {
+      const suffix = tags.length ? '\n\n' + tags.map((t) => '#' + t).join(' ') : '';
+      const base = CONFIG.LIMIT - (suffix ? TextMetrics.weight(suffix) : 0);
+      const bodies = this.build(text, numbering, base);
       const total = bodies.length;
-      if (!numbering || total <= 1) return bodies;
-      return bodies.map((body, index) => `${body}\n\n${index + 1}/${total}`);
+      return bodies.map(
+        (body, index) => body + suffix + (numbering && total > 1 ? `\n\n${index + 1}/${total}` : '')
+      );
     },
   };
 
@@ -283,29 +288,51 @@
       return tag.length <= 30 && /\p{L}/u.test(tag) ? tag : null;
     },
 
-    tagsFor(topic) {
-      const found = [];
-      const own = this.topicTag(topic);
-      if (own) found.push(own);
+    TONE_TAGS: {
+      curiosity: ['LessonsLearned', 'DidYouKnow', 'Insights'],
+      'before-after': ['Transformation', 'BeforeAndAfter', 'Progress'],
+      controversial: ['UnpopularOpinion', 'HotTake', 'RealTalk'],
+      'how-i': ['HowTo', 'BuildInPublic', 'Playbook'],
+    },
+    SUFFIXES: ['Tips', 'Hacks', 'Lessons', 'Community'],
+
+    // Invents hashtag candidates from the topic: the topic itself, keyword matches,
+    // tone-based classics and catchy variants like #FitnessHacks or #LearnFitness.
+    suggestTags(topic, tone) {
+      const words = topic.match(/[\p{L}\p{N}]+/gu) || [];
+      if (!words.length) return [];
+      const keyword = [];
       this.KEYWORD_TAGS.forEach(([pattern, tags]) => {
-        if (pattern.test(topic)) found.push(...tags);
+        if (pattern.test(topic)) keyword.push(...tags);
       });
+      const toneTags = this.TONE_TAGS[tone] || this.TONE_TAGS.curiosity;
+      const own = this.topicTag(topic);
+      const longest = words
+        .filter((w) => /\p{L}/u.test(w))
+        .sort((a, b) => b.length - a.length)[0];
+      const stem = own && own.length <= 18 ? own : longest ? this.capitalize(longest) : null;
+      const variants = stem && stem.length <= 18
+        ? [...this.SUFFIXES.map((s) => stem + s), 'Learn' + stem]
+        : [];
+      const single = words.length > 1 && longest && longest.length >= 5 ? this.capitalize(longest) : null;
+
       const seen = new Set();
-      return found
+      return [own, keyword[0], toneTags[0], ...keyword.slice(1), ...toneTags.slice(1), ...variants, single]
         .filter((tag) => {
+          if (!tag || tag.length > 30 || !/\p{L}/u.test(tag)) return false;
           const key = tag.toLowerCase();
           if (seen.has(key)) return false;
           seen.add(key);
           return true;
         })
-        .slice(0, CONFIG.MAX_HASHTAGS);
+        .slice(0, CONFIG.MAX_SUGGESTIONS);
     },
 
     // Hook text plus hashtags. Tags that would push it over the limit are dropped.
-    compose(hook, withTags) {
-      const tags = withTags ? hook.tags.slice() : [];
-      const build = () => (tags.length ? `${hook.body}\n\n${tags.map((t) => '#' + t).join(' ')}` : hook.body);
-      while (tags.length && TextMetrics.weight(build()) > CONFIG.LIMIT) tags.pop();
+    compose(body, tags) {
+      const list = tags.slice();
+      const build = () => (list.length ? `${body}\n\n${list.map((t) => '#' + t).join(' ')}` : body);
+      while (list.length && TextMetrics.weight(build()) > CONFIG.LIMIT) list.pop();
       return build();
     },
 
@@ -313,12 +340,10 @@
       const topic = this.normalizeTopic(rawTopic);
       if (!topic) return [];
       const templates = this.TEMPLATES[tone] || this.TEMPLATES.curiosity;
-      const tags = this.tagsFor(topic);
       return this.shuffle(templates)
         .slice(0, count)
         .map((template) => ({
           body: template.split('{topic}').join(topic).split('{Topic}').join(this.capitalize(topic)),
-          tags,
         }));
     },
   };
@@ -465,6 +490,9 @@
       hooks: [],
       posts: [],
       lastInsertedHook: '',
+      suggested: [],
+      selected: [],
+      threadTags: [],
     },
     dom: {},
 
@@ -472,6 +500,7 @@
       this.cacheDom();
       this.restore();
       this.renderHooks();
+      this.renderTagPanel();
       this.bindEvents();
       this.renderThread();
     },
@@ -487,6 +516,12 @@
         input: 'thread-input',
         numbering: 'opt-numbering',
         hashtags: 'opt-hashtags',
+        tagPanel: 'tag-panel',
+        tagChips: 'tag-chips',
+        tagCount: 'tag-count',
+        applyTags: 'btn-apply-tags',
+        threadTags: 'thread-tags',
+        threadTagsEmpty: 'thread-tags-empty',
         sample: 'btn-sample',
         clear: 'btn-clear',
         statChars: 'stat-chars',
@@ -513,10 +548,14 @@
       if (typeof saved.text === 'string') this.dom.input.value = saved.text;
       if (typeof saved.hashtags === 'boolean') this.dom.hashtags.checked = saved.hashtags;
       if (Array.isArray(saved.hooks)) {
-        this.state.hooks = saved.hooks.filter(
-          (h) => h && typeof h.body === 'string' && Array.isArray(h.tags)
-        );
+        this.state.hooks = saved.hooks
+          .filter((h) => h && typeof h.body === 'string')
+          .map((h) => ({ body: h.body }));
       }
+      const strings = (value) => (Array.isArray(value) ? value.filter((t) => typeof t === 'string') : []);
+      this.state.suggested = strings(saved.suggested);
+      this.state.selected = strings(saved.selected).slice(0, CONFIG.MAX_HASHTAGS);
+      this.state.threadTags = strings(saved.threadTags).slice(0, CONFIG.MAX_HASHTAGS);
       if (typeof saved.numbering === 'boolean') this.dom.numbering.checked = saved.numbering;
       if (saved.name) this.dom.name.value = saved.name;
       if (saved.handle) this.dom.handle.value = saved.handle;
@@ -530,6 +569,9 @@
         numbering: this.dom.numbering.checked,
         hashtags: this.dom.hashtags.checked,
         hooks: this.state.hooks,
+        suggested: this.state.suggested,
+        selected: this.state.selected,
+        threadTags: this.state.threadTags,
         name: this.dom.name.value,
         handle: this.dom.handle.value,
       });
@@ -551,6 +593,9 @@
         this.renderHooks();
         this.persist();
       });
+      dom.tagChips.addEventListener('click', (event) => this.handleTagToggle(event));
+      dom.applyTags.addEventListener('click', () => this.applyTags());
+      dom.threadTags.addEventListener('click', (event) => this.handleThreadTagRemove(event));
       dom.hookResults.addEventListener('click', (event) => this.handleHookClick(event));
 
       dom.input.addEventListener('input', () => this.handleChange());
@@ -590,7 +635,13 @@
       }
       dom.topicError.hidden = true;
       this.state.hooks = hooks;
+      this.state.suggested = HookGenerator.suggestTags(
+        HookGenerator.normalizeTopic(dom.topic.value),
+        dom.tone.value
+      );
+      this.state.selected = this.state.suggested.slice(0, CONFIG.MAX_HASHTAGS);
       this.renderHooks();
+      this.renderTagPanel();
       this.persist();
     },
 
@@ -615,8 +666,74 @@
       });
     },
 
+    activeTags() {
+      return this.dom.hashtags.checked ? this.state.selected : [];
+    },
+
     hookText(hook) {
-      return HookGenerator.compose(hook, this.dom.hashtags.checked);
+      return HookGenerator.compose(hook.body, this.activeTags());
+    },
+
+    renderTagPanel() {
+      const { tagPanel, tagChips, tagCount } = this.dom;
+      const { suggested, selected } = this.state;
+      tagPanel.hidden = suggested.length === 0;
+      tagChips.replaceChildren();
+      suggested.forEach((tag) => {
+        const chip = createButton('#' + tag, 'chip', 'toggle-tag', 0);
+        chip.dataset.tag = tag;
+        chip.setAttribute('aria-pressed', String(selected.includes(tag)));
+        tagChips.appendChild(chip);
+      });
+      tagCount.textContent = `${selected.length}/${CONFIG.MAX_HASHTAGS} selected`;
+    },
+
+    handleTagToggle(event) {
+      const chip = event.target.closest('button[data-tag]');
+      if (!chip) return;
+      const tag = chip.dataset.tag;
+      const { selected } = this.state;
+      if (selected.includes(tag)) {
+        this.state.selected = selected.filter((t) => t !== tag);
+      } else if (selected.length >= CONFIG.MAX_HASHTAGS) {
+        Toast.show(`Up to ${CONFIG.MAX_HASHTAGS} hashtags per post. Deselect one first.`);
+        return;
+      } else {
+        this.state.selected = [...selected, tag];
+      }
+      this.renderTagPanel();
+      this.renderHooks();
+      this.persist();
+    },
+
+    applyTags() {
+      if (!this.state.selected.length) {
+        Toast.show('Select at least one hashtag first');
+        return;
+      }
+      this.state.threadTags = this.state.selected.slice();
+      this.handleChange();
+      Toast.show('Hashtags added to every post');
+    },
+
+    renderThreadTags() {
+      const { threadTags, threadTagsEmpty } = this.dom;
+      const tags = this.state.threadTags;
+      threadTags.replaceChildren();
+      threadTagsEmpty.hidden = tags.length > 0;
+      tags.forEach((tag) => {
+        const chip = createButton(`#${tag} ×`, 'chip is-active', 'remove-tag', 0);
+        chip.dataset.tag = tag;
+        chip.setAttribute('aria-label', `Remove hashtag ${tag}`);
+        threadTags.appendChild(chip);
+      });
+    },
+
+    handleThreadTagRemove(event) {
+      const chip = event.target.closest('button[data-tag]');
+      if (!chip) return;
+      this.state.threadTags = this.state.threadTags.filter((t) => t !== chip.dataset.tag);
+      this.handleChange();
     },
 
     async handleHookClick(event) {
@@ -627,7 +744,7 @@
       const hook = this.hookText(entry);
 
       if (button.dataset.action === 'insert-hook') {
-        this.insertHook(hook);
+        this.insertHook(entry.body);
       } else if (button.dataset.action === 'copy-hook') {
         const ok = await Clipboard.copy(hook);
         if (ok) {
@@ -640,6 +757,9 @@
     },
 
     insertHook(hook) {
+      // Hashtags are applied to every post of the thread, not just the hook.
+      const addTags = this.dom.hashtags.checked && this.state.selected.length > 0;
+      if (addTags) this.state.threadTags = this.state.selected.slice();
       const { input, editorPanel } = this.dom;
       let existing = input.value.replace(/^\s+/, '');
 
@@ -660,7 +780,7 @@
       editorPanel.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' });
 
       this.handleChange();
-      Toast.show('Hook inserted at the start of your thread');
+      Toast.show(addTags ? 'Hook inserted. Hashtags added to every post' : 'Hook inserted at the start of your thread');
     },
 
     /* ---------- Thread editor and preview ---------- */
@@ -668,7 +788,8 @@
     renderThread() {
       const { dom } = this;
       const text = dom.input.value;
-      const posts = ThreadSplitter.format(text, dom.numbering.checked);
+      this.renderThreadTags();
+      const posts = ThreadSplitter.format(text, dom.numbering.checked, this.state.threadTags);
       this.state.posts = posts;
 
       dom.statChars.textContent = `${text.length.toLocaleString('en-US')} ${text.length === 1 ? 'character' : 'characters'}`;
