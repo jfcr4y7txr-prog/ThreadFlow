@@ -13,7 +13,8 @@
     MAX_HASHTAGS: 3,
     MAX_SUGGESTIONS: 12,
     TOAST_MS: 1800,
-    STORAGE_KEY: 'thread-studio:v2',
+    STORAGE_KEY: 'threadflow:v1',
+    LEGACY_STORAGE_KEY: 'thread-studio:v2',
     THREAD_SEPARATOR: '\n\n---\n\n',
     RING_RADIUS: 9,
   };
@@ -390,7 +391,8 @@
   const Store = {
     load() {
       try {
-        return JSON.parse(localStorage.getItem(CONFIG.STORAGE_KEY) || 'null');
+        const raw = localStorage.getItem(CONFIG.STORAGE_KEY) || localStorage.getItem(CONFIG.LEGACY_STORAGE_KEY);
+        return JSON.parse(raw || 'null');
       } catch (error) {
         return null;
       }
